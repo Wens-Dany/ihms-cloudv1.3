@@ -319,6 +319,11 @@ int main(void)
         // now check the command received from cloud server, run it if command != 0
         // command == 1   --  start a new data collection from motion sensor
 
+        if(TickGet() - LastFallDetectedTime > 1 * TICK_SECOND){
+            //B_SOUND_OFF();
+            LED1_OFF();
+        }
+
         if(command==1)
         {
                     start_time = TickGet();

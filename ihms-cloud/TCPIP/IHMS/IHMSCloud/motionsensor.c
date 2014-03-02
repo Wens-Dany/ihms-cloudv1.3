@@ -1,5 +1,6 @@
 #include "main.h"
 #include <plib.h>
+#include <math.h>
 
 //#define GetSystemClock()	(40000000ul)                // 40MHz is set by Max Choi, but the system clock should be 80MHz according to MCU specification.
 #define GetInstructionClock()	(GetSystemClock()/1)
@@ -11,9 +12,16 @@
 #define sensor_ADDRESS              0x1C       // The MMA8451Q's standard slave address is a choice between the two sequential addresses 0011100 - 0x1C and 0011101 - 0X1D. The
                                                 //selection is made by the high and low logic level of the SA0 (pin 7)
 
+#define WINDOW_LENGTH 1000
 
 
 BYTE sensortmpdata[7];  //for reading MMA845X Q  Data Registers from 0x00 to 0x06
+
+BOOL FIRST_VALUE = TRUE;
+BOOL FALL_DETECTED = FALSE;
+int LastSitDownTime;
+
+float MaxXmin = 0.2146, MaxXmax = 7.999, MeanXmin = -0.0171, MeanXmax = 0.0201, MaxYmin = 0.2285, MaxYmax = 7.9990, MaxZmin = 0.1934, MaxZmax = 7.9990, MeanYmin = -0.0470, MeanYmax = 0.0192, EnYmin = 16.1496, EnYmax = 1213.7, EnZmin = 1.7870, EnZmax = 797.5010, StdZmin = 0.0423, StdZmax = 0.8933, CovYZmin = -0.6177, CovYZmax = 0.7763, CovXZmax = 0.7429, CovXZmin = -0.5056;
 
 BOOL StartTransfer( BOOL restart );
 BOOL TransmitOneByte( UINT8 data );
@@ -29,6 +37,8 @@ BOOL motionsensor_init()
 {
     UINT32     actualClock;
     BOOL Success = TRUE;
+    LastSitDownTime = 0;
+    LastFallDetectedTime = 0;
 
     actualClock = I2CSetFrequency(sensor_I2C_BUS, GetPeripheralClock(), I2C_CLOCK_FREQ);
     if ( abs(actualClock-I2C_CLOCK_FREQ) > I2C_CLOCK_FREQ/10 )
@@ -38,6 +48,9 @@ BOOL motionsensor_init()
         }
     TRISBbits.TRISB14 = 0;
     LATBbits.LATB14 = 0;
+
+    TRISBbits.TRISB1 = 0;
+    LATBbits.LATB1 = 0;
 
     // Enable the I2C bus
     I2CEnable(sensor_I2C_BUS, TRUE);
@@ -56,14 +69,26 @@ BOOL motionsensor_init()
 
 int collect_sensor_data(int f_read)
 {
-    int i, j, data_size;
+    int signX, signY, signZ;  //the sign of x and y
+    int i, j, m, data_size;
+    volatile char* p;
+    int c = 56000, x;
+    unsigned short sx, sy, sz;
+    float fx, fy, fz;
+    float sumX=0, sumY=0, sumZ = 0, sumYZ = 0, sumXZ = 0, meanX=0, meanY=0, meanZ = 0, energySumY=0, energySumX = 0, maxX = -10000, maxY = -10000, maxZ = -10000, energySumZ = 0, stdZ = 0, covXZ = 0, covYZ = 0;
+    float halfSumX=0, halfSumY=0, halfSumZ = 0, halfSumYZ = 0, halfSumXZ = 0, halfEnergySumX = 0, halfEnergySumY=0, halfEnergySumZ = 0, halfMaxX = -10000, halfMaxY = -10000, halfMaxZ = -10000;
     BOOL  Success = TRUE;
-    
+    FIRST_VALUE = TRUE;
     if(f_read>0) data_size = 4;
             else    data_size = 7;
 
-    i = 0;
+    i = m = 0;
     LED2_ON();
+    FIRST_VALUE = TRUE;
+    if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+        FALL_DETECTED = FALSE;
+        LED1_OFF();
+    }
 
     while(i<MAXSENSORDATASIZE)
     {
@@ -89,6 +114,133 @@ int collect_sensor_data(int f_read)
               }
               */
             }
+            if((FIRST_VALUE && sensortmpdata[0] == 0xFF) || sensortmpdata[0] == 0x0F){
+                if(FIRST_VALUE)FIRST_VALUE = FALSE;
+                signX = (sensortmpdata[1] & 0x80) ? -1 : 1;
+                signY = (sensortmpdata[3] & 0x80) ? -1 : 1;
+                signZ = (sensortmpdata[5] & 0x80) ? -1 : 1;;
+                sx = ((sensortmpdata[1]<<6) + ((sensortmpdata[2]>>2)&0x3F)) & 0x1FFF;
+                if(signX < 0){
+                    sx = 0x2000 - sx;
+                }
+                sy = ((sensortmpdata[3]<<6) + ((sensortmpdata[4]>>2)&0x3F)) & 0x1FFF;
+                if(signY < 0){
+                    sy = 0x2000 - sy;
+                }
+                sz = ((sensortmpdata[5]<<6) + ((sensortmpdata[6]>>2)&0x3F)) & 0x1FFF;
+                if(signZ < 0){
+                    sz = 0x2000 - sz;
+                }
+                fx = signX * (float)sx / 1024.0;
+                fy = signY * (float)sy / 1024.0;
+                fz = signZ * (float)sz / 1024.0;
+                if(m < WINDOW_LENGTH / 2)
+                {
+                    sumX += fx;
+                    sumY += fy;
+                    sumZ += fz;
+                    sumYZ += fy * fz;
+                    sumXZ += fx * fz;
+                    if(fx > maxX)maxX = fx;
+                    if(fy > maxY)maxY = fy;
+                    if(fz > maxZ)maxZ = fz;
+                    energySumX += fx * fx;
+                    energySumY += fy * fy;
+                    energySumZ += fz * fz;
+                }else if(m <= WINDOW_LENGTH){
+                    if(m % WINDOW_LENGTH == 0){
+                        meanX = sumX / WINDOW_LENGTH;
+                        meanY = sumY / WINDOW_LENGTH;
+                        meanZ = sumZ / WINDOW_LENGTH;
+                        stdZ = sqrt((energySumZ - WINDOW_LENGTH * meanZ * meanZ)/WINDOW_LENGTH);
+                        covXZ = (WINDOW_LENGTH * sumXZ - sumX * sumZ) / (sqrt(WINDOW_LENGTH * energySumX - sumX * sumX) * sqrt(WINDOW_LENGTH * energySumZ - sumZ * sumZ));
+                        covYZ = (WINDOW_LENGTH * sumYZ - sumY * sumZ) / (sqrt(WINDOW_LENGTH * energySumY - sumY * sumY) * sqrt(WINDOW_LENGTH * energySumZ - sumZ * sumZ));
+                        covXZ = 2 * (covXZ - CovXZmin)/(CovXZmax - CovXZmin) - 1;
+                        covYZ = 2 * (covYZ - CovYZmin)/(CovYZmax - CovYZmin) - 1;
+                        energySumZ = 2 * (energySumZ - EnZmin)/(EnZmax - EnZmin) - 1;
+                        stdZ = 2 * (stdZ - StdZmin)/(StdZmax - StdZmin) -1;
+                        meanX = 2 * (meanX - MeanXmin)/(MeanXmax - MeanXmin) - 1;
+                        meanY = 2 * (meanY - MeanYmin)/(MeanYmax - MeanYmin) - 1;
+                        maxX = 2 * (maxX - MaxXmin)/(MaxXmax - MaxXmin) - 1;
+                        maxY = 2 * (maxY - MaxYmin)/(MaxYmax - MaxYmin) - 1;
+                        maxZ = 2 * (maxZ - MaxZmin)/(MaxZmax - MaxZmin) - 1;
+                        energySumY = 2 * (energySumY - EnYmin)/(EnYmax - EnYmin) - 1;
+                        //decision(maxX, maxY, meanX, meanY, energySumY);
+                        //decision3(meanX, maxY, maxZ, covYZ, energySumZ);
+                        //decision2(maxY, stdZ);
+                        decision4(maxX, meanX, maxZ, covXZ, covYZ);
+                        maxX = halfMaxX;
+                        maxY = halfMaxY;
+                        maxZ = halfMaxZ;
+                        halfMaxX = -10000;
+                        halfMaxY = -10000;
+                        halfMaxZ = -10000;
+                        m = WINDOW_LENGTH/2;//m = WINDOW_LENGTH * 0.3; //for 30% overlay window
+                        sumX = halfSumX + fx;
+                        sumY = halfSumY + fy;
+                        sumZ = halfSumZ + fz;
+                        sumYZ = halfSumYZ + fy * fz;
+                        sumXZ = halfSumXZ + fx * fz;
+                        energySumY = halfEnergySumY + fy * fy;
+                        energySumX = halfEnergySumX + fx * fx;
+                        energySumZ = halfEnergySumZ + fz * fz;
+                        halfSumX = fx;
+                        //halfSumX = 0;      //for 30% overlay window
+                        halfSumY = fy;
+                        //halfSumY = 0;
+                        halfSumZ = fz;
+                        //halfSumZ = 0;
+                        halfSumXZ = fx * fz;
+                        halfSumYZ = fy * fz;
+                        //halfSumYZ = 0;
+                        halfEnergySumX = fx * fx;
+                        halfEnergySumY = fy * fy;
+                        //halfEnergySumY = 0;
+                        halfEnergySumZ = fz * fz;
+                        //halfEnergySumZ = 0;
+                        if(fx > maxX)maxX = fx;
+                        if(fx > halfMaxX)halfMaxX = fx;
+                        if(fy > maxY)maxY = fy;
+                        if(fy > halfMaxY)halfMaxY = fy;
+                        if(fz > maxZ)maxZ = fz;
+                        if(fz > halfMaxZ)halfMaxZ = fz;
+                    }else if(m >= WINDOW_LENGTH / 2){        //m >= WINDOW_LENGTH * 0.7, 30%overlay window
+                        sumX += fx;
+                        sumY += fy;
+                        sumZ += fz;
+                        sumYZ += fy * fz;
+                        sumXZ += fx * fz;
+                        energySumX += fx*fx;
+                        energySumY += fy*fy;
+                        energySumZ += fz*fz;
+                        halfSumX += fx;
+                        halfSumY += fy;
+                        halfSumZ += fz;
+                        halfSumXZ += fx * fz;
+                        halfSumYZ += fy * fz;
+                        halfEnergySumX += fx * fx;
+                        halfEnergySumY += fy * fy;
+                        halfEnergySumZ += fz * fz;
+                        if(fx > maxX)maxX = fx;
+                        if(fy > maxY)maxY = fy;
+                        if(fz > maxZ)maxZ = fz;
+                        if(fx > halfMaxX)halfMaxX = fx;
+                        if(fy > halfMaxY)halfMaxY = fy;
+                        if(fz > halfMaxZ)halfMaxZ = fz;
+                    }/*else{
+                        sumX += fx;
+                        sumY += fy;
+                        sumZ += fz;
+                        sumYZ += fy *fz;
+                        energySumY += fy*fy;
+                        energySumZ += fz*fz;
+                        if(fx > maxX)maxX = fx;
+                        if(fy > maxY)maxY = fy;
+                        if(fz > maxZ)maxZ = fz;
+                    }*/
+                }
+                m++;
+            }
         }
     }
 
@@ -96,6 +248,220 @@ int collect_sensor_data(int f_read)
  
     return i;
 
+}
+
+
+void decision4(float maxX, float meanX, float maxZ, float covXZ, float covYZ){
+    if(FALL_DETECTED && (TickGet() - LastFallDetectedTime > 3 * TICK_SECOND)){
+        FALL_DETECTED = FALSE;
+    }
+    if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+        //B_SOUND_OFF();
+        //LED1_OFF();
+        //printf("3");
+        //FALL_DETECTED = FALSE;
+    }
+
+    if(maxZ <= -0.81684){
+        //printf("1"); //walk
+    }else{
+        if(covXZ <= 0.498979){
+            if(meanX <= -0.0984032){
+                if(maxX <= 0.244762){
+                    //printf("4");
+                }else{
+                    //printf("3");
+                    if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+                        //B_SOUND_ON();
+                        LED1_ON();
+                        //printf("3");
+                        FALL_DETECTED = TRUE;
+                        LastFallDetectedTime = TickGet();
+                    }
+                }
+            }else{
+                if(covYZ <= 0.41822){
+                    //printf("3");
+                    if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+                        //B_SOUND_ON();
+                        LED1_ON();
+                        //printf("3");
+                        FALL_DETECTED = TRUE;
+                        LastFallDetectedTime = TickGet();
+                    }
+                }else{
+                    //printf("4");
+                }
+            }
+        }else{
+            if(maxZ <= 0.130239){
+                //printf("2");
+            }else{
+                //printf("3");
+                if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+                    //B_SOUND_ON();
+                    LED1_ON();
+                    //printf("3");
+                    FALL_DETECTED = TRUE;
+                    LastFallDetectedTime = TickGet();
+                }
+            }
+        }
+    }
+}
+
+void decision3(float meanX, float maxY, float maxZ, float covYZ, float enZ){
+    if(FALL_DETECTED && (TickGet() - LastFallDetectedTime > 2 * TICK_SECOND)){
+        FALL_DETECTED = FALSE;
+    }
+    if(TickGet() - LastFallDetectedTime > 1 * TICK_SECOND){
+        LED0_ON();
+        B_SOUND_OFF();
+        LED1_OFF();
+        //printf("3");
+        FALL_DETECTED = FALSE;
+    }
+    if(maxY > -0.38){
+        if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+            LED0_OFF();
+            B_SOUND_ON();
+            LED1_OFF();
+            //printf("3");
+            FALL_DETECTED = TRUE;
+            LastFallDetectedTime = TickGet();
+        }
+    }else if(enZ <= -0.981629){
+        if(meanX <= -0.11545){
+            if(!FALL_DETECTED && (TickGet() - LastSitDownTime > 2*TICK_SECOND)){
+                LED1_ON();
+                //printf("2");
+                LastSitDownTime = TickGet();
+            }
+        }else if(maxY <= -0.974614){
+            if(!FALL_DETECTED && (TickGet() - LastSitDownTime > 2*TICK_SECOND)){
+                LED1_ON();
+                //printf("2");
+                LastSitDownTime = TickGet();
+            }
+        }else{
+            //printf("4");
+        }
+    }else{
+        if(covYZ > -0.481108){
+            //printf("1");
+        }else if(maxZ <= -0.846309){
+            //printf("1");
+        }else{
+            //printf("4");
+        }
+    }
+}
+
+void decision2(float maxY, float stdZ){
+    if(FALL_DETECTED && (TickGet() - LastFallDetectedTime > 5 * TICK_SECOND)){
+        FALL_DETECTED = FALSE;
+    }
+    if(TickGet() - LastFallDetectedTime > 1 * TICK_SECOND){
+        //B_SOUND_OFF();
+        LED1_OFF();
+        //printf("3");
+        FALL_DETECTED = FALSE;
+    }
+    if(maxY > -0.768506){
+        //printf("3");
+        if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+            //B_SOUND_ON();
+            LED1_ON();
+            //printf("3");
+            FALL_DETECTED = TRUE;
+            LastFallDetectedTime = TickGet();
+        }
+    }else if(stdZ <= -0.910844){
+        if(!FALL_DETECTED && (TickGet() - LastSitDownTime > 2*TICK_SECOND)){
+            //LED1_ON();
+            //printf("2");
+            LastSitDownTime = TickGet();
+        }
+    }else{
+        //printf("1");
+    }
+}
+
+void decision(float maxX, float maxY, float meanX, float meanY, float enY){
+    if(maxY <= -0.834681){
+        if(maxX > -0.929199)
+        {
+
+            //printf("1");
+        }else{
+            if(maxY  <= -0.926206){
+
+                //printf("1");
+            }else{
+                if(TickGet() - LastSitDownTime > 2*TICK_SECOND){
+                    LED1_ON();
+                    //printf("2");
+                    LastSitDownTime = TickGet();
+                }
+            }
+        }
+    }else if(enY > -0.707265 && enY <= 0.610428){
+        if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+            LED0_OFF();
+            //printf("3");
+            LastFallDetectedTime = TickGet();
+        }
+    }else if(enY > 0.610428){
+        if(maxY <= 0.403129){
+            if(TickGet() - LastSitDownTime > 2*TICK_SECOND){
+                LED1_ON();
+                //printf("2");
+                LastSitDownTime = TickGet();
+            }
+        }else{
+            if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+                LED0_OFF();
+                //printf("3");
+                LastFallDetectedTime = TickGet();
+            }
+        }
+    }else if(enY > -0.890036 && enY < -0.707265){
+        if(maxY > -0.255802){
+            if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+                LED0_OFF();
+                //printf("3");
+                LastFallDetectedTime = TickGet();
+            }
+        }else{
+            if(meanX <= 0.519166){
+                if(TickGet() - LastSitDownTime > 2*TICK_SECOND){
+                    LED1_ON();
+                    //printf("2");
+                    LastSitDownTime = TickGet();
+                }
+            }else{
+                if(maxX <= 0.260974){
+                    if(TickGet() - LastSitDownTime > 2*TICK_SECOND){
+                        LED1_ON();
+                        //printf("2");
+                        LastSitDownTime = TickGet();
+                    }
+                }else{
+                    if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+                        LED0_OFF();
+                        //printf("3");
+                        LastFallDetectedTime = TickGet();
+                    }
+                }
+            }
+        }
+    }else{
+        if(TickGet() - LastFallDetectedTime > 2 * TICK_SECOND){
+            LED0_OFF();
+            //printf("3");
+            LastFallDetectedTime = TickGet();
+        }
+    }
 }
 
 BOOL i2c_read_reg(int f_read)
@@ -149,7 +515,6 @@ BOOL i2c_read_reg(int f_read)
                 Success = FALSE;
             }
         }
-        LED1_ON();
     // End the transfer (hang here if an error occured)
     //StopTransfer();
     StopTransfer();

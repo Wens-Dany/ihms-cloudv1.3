@@ -109,6 +109,7 @@ int cmd_no;       // command No. sent by cloud server. 0 means NULL at the momen
 
 int ack;          // acknowledgement code from cloud server for data verification check. 0 means no data received yet.
 
+int LastFallDetectedTime;
 
 #define MAXSENSORDATASIZE         56000       //  for collecting MMA8451 Q acceleration sensor XYZ sample output (2 bytes for each X, Y , Z data output; 1 byte for Data Status Register
 BYTE motionsensor[MAXSENSORDATASIZE];

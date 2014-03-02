@@ -100,6 +100,9 @@
 #define LED2_OFF()          LATFCLR = BIT_0;
 #define LED2_INV()          LATFINV = BIT_0;
 
+#define B_SOUND_ON()        LATBbits.LATB1 = 1;
+#define B_SOUND_OFF()       LATBbits.LATB1 = 0;
+
 #define SW0_TRIS            (TRISDbits.TRISD9)
 #define	SW0_IO              (PORTDbits.RD9)
 
