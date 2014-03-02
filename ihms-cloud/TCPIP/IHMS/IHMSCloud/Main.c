@@ -388,7 +388,7 @@ int main(void)
         #endif
 
   //    Exosite_Demo();
-        HTTPClient();
+        //HTTPClient();
         // Process application specific tasks here.
         // Any custom modules or processing you need to do should
         // go here.

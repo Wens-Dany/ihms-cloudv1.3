@@ -254,7 +254,7 @@ static int WFEasyConfigProcess(void)
     //WFConsolePrintRomStr("Wakeup Wi-Fi module.", TRUE);
 #else    
     /* Kick off connection now... */
-    WF_CMConnect(ConnectionProfileID);
+    //WF_CMConnect(ConnectionProfileID); //for Disable wifi
 #endif
 
     /* Change state and return TRUE to show we are done! */
